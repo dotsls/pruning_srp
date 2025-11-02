@@ -1,6 +1,7 @@
 import torch
 from math import ceil
 from time import time
+from enum import Enum
 
 # model configurator
 # vit has q, k, v, att_proj, fc1, fc2 matrices to optimize
@@ -28,6 +29,64 @@ class VisionModel:
         for _ in range(self.nb):
             self.bs.append(Attn(emb_dim, head_dim, n_heads))
 
+class PruningTypes(Enum):
+    DEPTH = 0
+    WIDTH = 1
+    HEAD = 2 # valid only for attention
+    NONE = 3 # means doesn't do pruning
+
+class PruningInterface:
+    # make sure to implement all functions and variables in this interface
+    # the way how self.nn is used is up to you, just make sure to include it
+    # it could be vit from transformers or timm, you decide
+    # correctly assign pruning types for your method.
+    # PruningTypes.None means pruning this structure is unsupported
+    def __init__(self, model, pruning_dataloader):
+        self.nn = model
+        self.dl = pruning_dataloader
+        self.att_prune_type = PruningTypes.DEPTH
+        self.mlp_prune_type = PruningTypes.WIDTH
+
+    # Your algorithm should return importance metric according to this format
+    # format is designed in a way that is most efficient for that pruning type
+    # code below is just a description for format of importance metrics
+    # you can change it as you like. 
+    # Lower importance means can be pruned earlier
+    def fit(self):
+        match self.att_prune_type:
+            case PruningTypes.DEPTH:
+                self.att_importance = torch.randn((self.nn.n_blocks,))
+            case PruningTypes.HEAD :
+                self.att_importance = [torch.randn((b.n_heads,)) for b in self.nn.blocks]
+            case PruningTypes.WIDTH:
+                # [q, k] and [v, proj] matrices are interrelated
+                # their neurons should be pruned together
+                # so we only need 2 tensors per block instead of 4
+                self.att_importance = [[
+                    torch.randn(b.q.shape[:1]), torch.randn(b.v.shape[:1])
+                ] for b in self.nn.blocks]
+                # width pruning in this case should reduce hidden dimension of 
+                # q,k,v matrices. Not embedding dimension.
+                # reducing embedding dimension is possible, but troublesome
+                # let us know if your pruning algorithm does that
+            case _:
+                self.att_importance = None
+
+        match self.mlp_prune_type:
+            case PruningTypes.DEPTH:
+                self.mlp_importance = torch.randn((self.nn.n_blocks,))
+            case PruningTypes.WIDTH:
+                # fc1 and fc2 are interrelated, their neurons are pruned together
+                # so we only need 1 tensor per block instead of 2
+                self.mlp_importance = [torch.randn(b.fc1.shape[:1]) for b in self.nn.blocks]
+                # same consideration goes for reducing embedding dimension
+                # just like in attention width pruning
+                # let us know if your pruning algorithm does that
+            case _:
+                self.mlp_importance = None
+
+        return self.att_importance, self.mlp_importance
+        
 # 5 types of pruning
 # depth, width, head pruning(att), n:m block sparsity, unstructured
 # interconnected groups for different kinds of pruning. these groups must be adjusted together
